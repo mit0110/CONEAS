@@ -7,7 +7,7 @@ Finally, we also include manual evaluation of generated counter-narratives used 
 ## INSTALL REQUIREMENTS
 
 ```
-pip install requirements.txt
+pip install -r requirements.txt
 ```
 
 ## Generating Counter-Narratives
@@ -15,7 +15,7 @@ pip install requirements.txt
 To fine-tune a model or use an existing model to generate counter-narratives you can run the following command:
 
 ```
-python counter-narratives_generation_and_finetuning.py --dataset DATASET --generation-strategy STRATEGY --language LANGUAGE --use_extra_info EXTRA_INFO --cn_strategy CNSTRATEGY --model_name MODELNAME
+python cn_generation_and_finetuning.py --dataset DATASET --generation-strategy STRATEGY --language LANGUAGE --use_extra_info EXTRA_INFO --cn_strategy CNSTRATEGY --model_name MODELNAME
 ```
 where:
 -  DATASET is either "asohmo", "conan" or "both", meaning that the dataset to be used either for train or generation is ASOHMO, CONAN or a combination of both
