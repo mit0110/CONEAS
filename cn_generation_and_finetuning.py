@@ -1,24 +1,19 @@
-import json
-import random
-from datasets import Dataset
-import pandas as pd
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
-from datasets import load_dataset
-from datasets import Dataset
-import evaluate
-from sentence_transformers import SentenceTransformer, util
-from glob import glob
-import torch
-import numpy as np
-from transformers import DataCollatorForSeq2Seq
-from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
-
 import argparse
+import evaluate
+import numpy as np
+import pandas as pd
+import torch
 
-from dataset import parse_dataset
+from datasets import Dataset
+from sentence_transformers import SentenceTransformer, util
+from transformers import (AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM, DataCollatorForSeq2Seq,
+                          Seq2SeqTrainer, Seq2SeqTrainingArguments)
+
+from coneas_dataset import load_conan, load_asohmo
 
 device = torch.device("cuda")
-parser = argparse.ArgumentParser(description="Train models for identifying argumentative components inside the ASFOCONG dataset")
+parser = argparse.ArgumentParser(
+    description="Train models for identifying argumentative components inside the ASFOCONG dataset")
 parser.add_argument("dataset", type=str, choices=["conan", "asohmo", "both"])
 parser.add_argument("generation_strategy", type=str, choices=["zeroshot", "fewshot", "finetuned", "pretraining"])
 parser.add_argument("language", type=str, choices=["english", "multi"])
@@ -35,149 +30,13 @@ pretraining = args.generation_strategy == "pretraining" or args.generation_strat
 FEWSHOT_EXAMPLES_AMOUNT = 2
 fewshot_examples = {}
 
-def load_conan(language):
-
-    j = open("dataset/CONAN/CONAN.json", "r")
-    conan = json.load(j)
-    if language == "english":
-        conan_dataset = [{**dct, **{"language": "EN"}} for dct in filter(lambda cn: cn["cn_id"].startswith("EN"), conan["conan"])]
-    elif language == "multi":
-        conan_dataset_fr = [{**dct, **{"language": "FR"}} for dct in filter(lambda cn: cn["cn_id"].startswith("FR"), conan["conan"])]
-        conan_dataset_it = [{**dct, **{"language": "IT"}} for dct in filter(lambda cn: cn["cn_id"].startswith("IT"), conan["conan"])]
-        conan_dataset = conan_dataset_fr + conan_dataset_it
-
-    group_by_tweet = {}
-    for cn in conan_dataset:
-        if not cn["hateSpeech"] in group_by_tweet:
-            group_by_tweet[cn["hateSpeech"]] = [[cn["counterSpeech"]], cn["language"]]
-        else:
-            group_by_tweet[cn["hateSpeech"]][0].append(cn["counterSpeech"])
-
-    acum = 0
-    val_threshold = len(conan_dataset) * 0.8
-    if pretraining:
-        train_threshold = len(conan_dataset) * 0.7
-        train_dataset = []
-        val_dataset = []
-    test_dataset = []
-    keys = list(group_by_tweet.keys())
-    keys.sort()
-    random.seed(42)
-    random.shuffle(keys)
-    current_fewshot_examples = {}
-    for key in keys:
-        if pretraining:
-            if acum < train_threshold:
-                train_dataset.append({"hateSpeech": key, "counterSpeech": group_by_tweet[key][0], "language": group_by_tweet[key][1]})
-            elif acum < val_threshold:
-                val_dataset.append({"hateSpeech": key, "counterSpeech": group_by_tweet[key][0], "language": group_by_tweet[key][1]})
-        elif args.generation_strategy == "fewshot":
-            language = group_by_tweet[key][1]
-            if language not in current_fewshot_examples:
-                current_fewshot_examples[language] = 1
-                fewshot_examples[language] = [{"hateSpeech": key, "counterSpeech": group_by_tweet[key][0][0]}]
-            elif current_fewshot_examples[language] < FEWSHOT_EXAMPLES_AMOUNT:
-                current_fewshot_examples[language] += 1
-                fewshot_examples[language].append({"hateSpeech": key, "counterSpeech": group_by_tweet[key][0][0]})
-        if acum >= val_threshold:
-            test_dataset.append({"hateSpeech": key, "counterSpeech": group_by_tweet[key][0], "language": group_by_tweet[key][1]})
-
-        acum += len(group_by_tweet[key][0])
-    if pretraining:
-        return [test_data, train_dataset, val_dataset]
-    return [test_dataset]
-
-
-def load_asohmo(language, use_extra_info=""):
-
-    lang_setting = language.replace("multi", "spanish")
-    # if language == "english":
-    cns_by_tweet, nonargs, cn_length, cn_type_not_present = parse_dataset(f"dataset/ASOHMO/{lang_setting}/test/*.conll", use_extra_info=use_extra_info, language=language)
-    if pretraining:
-        cns_by_tweet_train, nonargs2, cn_length2, cn_type_not_present2 = parse_dataset(f"dataset/ASOHMO/{lang_setting}/train/*.conll", use_extra_info=use_extra_info, language=language)
-        cns_by_tweet_dev, nonargs3, cn_length3, cn_type_not_present3 = parse_dataset(f"dataset/ASOHMO/{lang_setting}/dev/*.conll", use_extra_info=use_extra_info, language=language)
-        print(f"{nonargs} - {nonargs2} - {nonargs3}")
-        nonargs += nonargs2 + nonargs3
-        cn_length += cn_length2 + cn_length3
-        cn_type_not_present += cn_type_not_present2 + cn_type_not_present3
-        if language == "multi":
-            cns_by_tweet_en, nonargs_en, cn_length_en, cn_type_not_present_en = parse_dataset(f"dataset/ASOHMO/english/test/*.conll", use_extra_info=use_extra_info, language=language)
-            cns_by_tweet_train2_en, nonargs2_en, cn_length2_en, cn_type_not_present2_en = parse_dataset(f"dataset/ASOHMO/english/train/*.conll", use_extra_info=use_extra_info, language=language)
-            cns_by_tweet_dev3_en, nonargs3_en, cn_length3_en, cn_type_not_present3_en = parse_dataset(f"dataset/ASOHMO/english/dev/*.conll", use_extra_info=use_extra_info, language=language)
-
-            cns_by_tweet = {**cns_by_tweet, **cns_by_tweet_en}
-            cns_by_tweet_train = {**cns_by_tweet_train, **cns_by_tweet_train2_en}
-            cns_by_tweet_dev = {**cns_by_tweet_dev, **cns_by_tweet_dev3_en}
-
-            nonargs += nonargs_en + nonargs2_en + nonargs3_en
-            cn_length += cn_length_en + cn_length2_en + cn_length3_en
-            cn_type_not_present += cn_type_not_present_en + cn_type_not_present2_en + cn_type_not_present3_en
-    # elif language == "multi":
-    #     cns_by_tweet, nonargs, cn_length, cn_type_not_present = parse_dataset("dataset/ASOHMO/spanish/test/*.conll", use_extra_info=use_extra_info, language=language)
-    #     if pretraining:
-    #         cns_by_tweet2, nonargs2, cn_length2, cn_type_not_present2 = parse_dataset("dataset/ASOHMO/english/*.conll", use_extra_info=use_extra_info, language="english")
-    #         cns_by_tweet = {**cns_by_tweet, **cns_by_tweet2}
-    #         nonargs += nonargs2
-    #         cn_length += cn_length2
-    #         cn_type_not_present += cn_type_not_present2
-    print(f"Counter narratives without the required type of counter-narrative: {cn_type_not_present}")
-    print(f"Non arg examples discarted for not having CN: {nonargs}")
-    if pretraining:
-        print(f"{len(cns_by_tweet.keys())} - {len(cns_by_tweet_train.keys())} - {len(cns_by_tweet_dev.keys())}")
-    # if pretraining:
-        # train_threshold = cn_length * 0.7
-        # train_dataset = []
-        # val_dataset = []
-    # val_threshold = cn_length * 0.8
-    test_dataset = []
-    if pretraining:
-        train_dataset = []
-        val_dataset = []
-    # acum = 0
-    keys = list(cns_by_tweet.keys())
-    keys.sort()
-    random.seed(42)
-    random.shuffle(keys)
-    current_fewshot_examples = {}
-    for key in keys:
-        if pretraining:
-            for cn in cns_by_tweet[key]["cns"]:
-                to_append = {"hateSpeech": key + cns_by_tweet[key]["extra_info"], "counterSpeech": cn, "language": cns_by_tweet[key]["lang"]}
-                test_dataset.append(to_append)
-        else:
-            to_append = {"hateSpeech": key + cns_by_tweet[key]["extra_info"], "counterSpeech": cns_by_tweet[key]["cns"], "language": cns_by_tweet[key]["lang"]}
-            language_code = "ES" if language == "multi" else "EN"
-            if args.generation_strategy == "fewshot" and (language_code not in current_fewshot_examples or current_fewshot_examples[language_code] < FEWSHOT_EXAMPLES_AMOUNT):
-                if language_code not in current_fewshot_examples:
-                    current_fewshot_examples[language_code] = 1
-                    fewshot_examples[language_code] = [{"hateSpeech": key, "counterSpeech": cns_by_tweet[key]["cns"][0]}]
-                else:
-                    current_fewshot_examples[language_code] += 1
-                    fewshot_examples[language_code].append({"hateSpeech": key, "counterSpeech": cns_by_tweet[key]["cns"][0]})
-            else:
-                test_dataset.append(to_append)
-
-        # print(to_append)
-    if pretraining:
-        for key in cns_by_tweet_train:
-            for cn in cns_by_tweet_train[key]["cns"]:
-                to_append = {"hateSpeech": key + cns_by_tweet_train[key]["extra_info"], "counterSpeech": cn, "language": cns_by_tweet_train[key]["lang"]}
-                train_dataset.append(to_append)
-        for key in cns_by_tweet_dev:
-            for cn in cns_by_tweet_dev[key]["cns"]:
-                to_append = {"hateSpeech": key + cns_by_tweet_dev[key]["extra_info"], "counterSpeech": cn, "language": cns_by_tweet_dev[key]["lang"]}
-                val_dataset.append(to_append)
-
-    # test_data = Dataset.from_pandas(pd.DataFrame(test_dataset))
-    if pretraining:
-        return [test_dataset, train_dataset, val_dataset]
-    return [test_dataset]
 
 if args.dataset == "conan":
-    print("loading conan")
-    datasetss = load_conan(args.language)
+    print("Loading conan dataset")
+    datasetss = load_conan(args.language, pretraining=pretraining, generation_strategy=args.generation_strategy,
+                           fewshot_examples_amount=FEWSHOT_EXAMPLES_AMOUNT, fewshot_examples=fewshot_examples)
 elif args.dataset == "asohmo":
-    print("loading asohmo")
+    print("Loading asohmo dataset")
     exxtra_info = args.use_extra_info
     if args.cn_strategy == "a":
         if args.use_extra_info == "premises":
@@ -194,11 +53,15 @@ elif args.dataset == "asohmo":
             exxtra_info = "cn_c"
         else:
             exxtra_info = "cn_c_no_info"
-    datasetss = load_asohmo(args.language, use_extra_info=exxtra_info)
+    datasetss = load_asohmo(args.language, use_extra_info=exxtra_info, pretraining=pretraining,
+                            generation_strategy=args.generation_strategy,
+                            fewshot_examples_amount=FEWSHOT_EXAMPLES_AMOUNT, fewshot_examples=fewshot_examples)
 else:
-    print("loading both datasets")
-    datasetss1 = load_asohmo(args.language)
-    datasetss2 = load_conan(args.language)
+    print("Loading both datasets")
+    datasetss1 = load_asohmo(args.language, pretraining=pretraining, generation_strategy=args.generation_strategy,
+                             fewshot_examples_amount=FEWSHOT_EXAMPLES_AMOUNT, fewshot_examples=fewshot_examples)
+    datasetss2 = load_conan(args.language, pretraining=pretraining, generation_strategy=args.generation_strategy,
+                            fewshot_examples_amount=FEWSHOT_EXAMPLES_AMOUNT, fewshot_examples=fewshot_examples)
     datasetss = [dtst1 + dtst2 for dtst1, dtst2 in zip(datasetss1, datasetss2)]
 
 test_dataset = datasetss[0]
@@ -210,8 +73,6 @@ test_data = Dataset.from_pandas(pd.DataFrame(test_dataset))
 if pretraining:
     train_data = Dataset.from_pandas(pd.DataFrame(train_dataset))
     val_data = Dataset.from_pandas(pd.DataFrame(val_dataset))
-
-
 
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
